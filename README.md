@@ -11,12 +11,16 @@
 .
 ├── frontend/                 Vue 3 + Vite + TypeScript 前端
 │   ├── src/views/WorkbenchView.vue|tsx  全部模块共享工作台
-│   ├── src/data/modules.ts              18个业务模块配置
-│   ├── src/api/              统一请求封装
+│   ├── src/views/CredentialView.vue     批次归属凭据核对工作台
+│   ├── src/data/modules.ts              业务模块配置
+│   ├── src/domain/<模块>.ts             承载真实业务差异的前端领域逻辑
+│   ├── src/api/              统一请求封装与凭据专用接口
 │   └── vite.config.ts        dev server 配置（open: false）
 ├── backend/                  FastAPI（Python） 后端
 │   ├── app/routers/resource.py  通用查询/导出/登记/动作接口
+│   ├── app/routers/ownership.py 批次归属凭据专用接口
 │   ├── app/services/<key>.py    每个模块独立领域逻辑
+│   ├── app/services/scope_range.py  交付范围区间运算
 │   ├── app/services/base.py     共享服务骨架
 │   └── app/store.py          内存数据仓库与示例数据
 ├── .gitignore
@@ -69,6 +73,28 @@ npm run dev
 | 时效监控 | `sla_monitor` | 时效指标 | 指标编号、源端编号、约定到达时限 |
 | 通道配置 | `channel_config` | 传输通道 | 通道编号、传输协议、并发连接数 |
 
+## 批次数据归属凭据
+
+源端与目标端之间原本只有批次号和条数，缺少一份能说明“这份批次数据归属于哪个源端、
+覆盖哪些记录、目标端实际领用了多少”的凭据。`ownership_credential` 模块补上这一环：
+
+- **配置快照校验**：签发时从源端/目标端登记、抽取窗口与批次固化一份配置快照摘要，
+  `GET /api/ownership_credential/{id}/verify-scope` 核对交付范围是否落在快照允许的记录数内。
+- **领用范围区分**：交付范围拆成「已领用范围」和「未领用范围」，
+  `POST /api/ownership_credential/{id}/claim` 只划走要发运的部分；传输批次
+  （`TransferBatchService.start_transfer`）按凭据已领用范围筛选记录，未领用部分留在源端。
+- **归属反查**：`GET /api/ownership_credential/resolve?target_code=…&record_range=…`
+  按目标端接收序号回答每条记录属于哪个源端/凭据，两个来源同时认领同一序号会标记重叠。
+- **交接**：`POST /api/ownership_credential/{id}/handover` 只追加交接留痕，
+  不替新接收方撤销旧凭据；`保留到结案` 让旧凭据继续有效，`发货前重新确认` 会把旧凭据
+  推进到待重新确认、并让传输闸门拦下旧批发运，直到 `确认发运`。已落地/已结案旧批的
+  交付范围、领用范围与阶段不因交接改写。
+- **落地核对与历史回查**：`GET /{id}/verify-landed` 用暂存落地记录的 `target_no`
+  核对缺失与越界序号；`GET /history` 默认返回已落地/已结案凭据，历史 A 批仍可回查。
+
+前端 `批次归属凭据` 页面（`/ownership_credential`）提供范围条、回执解读、
+领用/交接弹窗与目标端归属核对面板。
+
 ## 约定
 
 - 全部模块共享`frontend/src/views/WorkbenchView.vue|tsx`和一套资源路由。
@@ -76,6 +102,8 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+- 批次归属凭据的子路径接口（`/api/ownership_credential/issue` 等）在通用资源路由之前注册，
+  避免被 `/api/{module}/{entry_id}` 抢先匹配。
 
 领域：数据工程
 子方向：数仓与数据湖

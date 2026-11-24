@@ -14,6 +14,8 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 示例凭据的配置快照摘要由 app.services 注册完成后补齐（见 services/__init__.py）
+
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)

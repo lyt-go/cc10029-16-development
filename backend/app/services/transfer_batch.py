@@ -2,12 +2,14 @@
 
 本模块读取抽取窗口产物文件后创建传输批次，分片写入传输数据文件，
 传输完成后自动驱动暂存落地和校验核对，形成窗口抽取→批次传输→落地校验的贯通链路。
+批次若已登记归属凭据，传输只能发运凭据里「已领用」的那部分记录，未领用范围留在源端。
 """
 from __future__ import annotations
 
 import time
 from typing import Any
 
+from app.services import scope_range
 from app.services.base import BaseModuleService
 from app.store import store
 
@@ -57,12 +59,24 @@ class TransferBatchService(BaseModuleService):
         if batch_entry is None:
             return {"error": f"传输批次 {batch_id} 不存在"}
 
+        batch_code = batch_entry["批次编号"]
+        window_code = batch_entry.get("窗口编号", "unknown")
+
+        # 凭据闸门：已登记归属凭据的批次只能发运已领用范围
+        gate = {"mode": "unrestricted", "allowed": None, "reasons": []}
+        try:
+            oc_svc = self._safe_import(
+                "app.services.ownership_credential", "OwnershipCredentialService")()
+            gate = oc_svc.shipment_gate(batch_code, window_code)
+        except Exception as e:
+            gate = {"mode": "unrestricted", "allowed": None, "reasons": [], "error": str(e)}
+        if gate.get("mode") == "blocked":
+            return {"error": "；".join(gate.get("reasons") or ["凭据未允许发运"]),
+                    "batch_id": batch_id, "ownership_gate": gate}
+
         entry, msg = self.run_action(batch_id, "启动传输")
         if entry is None:
             return {"error": msg, "batch_id": batch_id}
-
-        batch_code = batch_entry["批次编号"]
-        window_code = batch_entry.get("窗口编号", "unknown")
 
         # 读取上游抽取窗口的产物文件
         artifact_dir = self._data_dir("extracted")
@@ -75,6 +89,13 @@ class TransferBatchService(BaseModuleService):
             # 如果上游产物文件不存在，生成模拟数据
             records = self._simulate_records(batch_code, count=int(batch_entry.get("记录条数", 10)),
                                               field_prefix="trans")
+
+        # 按凭据已领用范围筛选可发运记录，未领用部分留在源端不发
+        allowed = gate.get("allowed")
+        if allowed is not None:
+            allowed_numbers = set(scope_range.expand(allowed))
+            records = [rec for rec in records
+                       if self._record_line_no(rec) in allowed_numbers]
 
         # 分片写入传输产物文件
         output_file = self._data_dir("batches") / f"{batch_code}.jsonl"
@@ -117,6 +138,11 @@ class TransferBatchService(BaseModuleService):
             "total_bytes": total_bytes,
             "chunks": len(chunks),
             "artifact_path": str(output_file),
+            "ownership_gate": {
+                "mode": gate.get("mode"),
+                "allowed": gate.get("allowed_text", ""),
+                "credentials": gate.get("credentials", []),
+            },
         }
 
         # 传输完成后自动触发暂存落地
@@ -144,6 +170,16 @@ class TransferBatchService(BaseModuleService):
             result["auto_reconcile"] = {"error": str(e)}
 
         return result
+
+    @staticmethod
+    def _record_line_no(record: dict[str, Any]) -> int | None:
+        """取记录的源记录序号，用于和凭据范围比对。"""
+        for key in ("line_no", "record_no"):
+            try:
+                return int(record.get(key))
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def mark_completed(self, batch_id: int) -> dict[str, Any]:
         """标记传输批次已完成，写入完成事件日志并记录批次汇总统计。"""

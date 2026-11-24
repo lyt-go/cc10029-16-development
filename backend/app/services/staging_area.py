@@ -28,7 +28,7 @@ class StagingAreaService(BaseModuleService):
         暂存分区是传输链路中数据暂存的关键环节：它从传输产物文件读取数据，
         计算字节量，写入落地路径下的暂存产物文件，并推进分区水位。
         """
-        staging_code = f"STAG-{batch_code}-{int(time.time())}"
+        staging_code = f"STAG-{batch_code}-{time.time_ns()}"
         landing_path = f"/staging/{batch_code}/"
         values = {
             "暂存编号": staging_code,
@@ -55,6 +55,15 @@ class StagingAreaService(BaseModuleService):
             records = self._simulate_records(batch_code, count=record_count, field_prefix="staging")
             total_bytes = sum(len(str(r).encode("utf-8")) for r in records)
 
+        # 标注目标端接收序号：同一目标端多份来源时靠它区分落地记录归属。
+        # 序号以源记录号为准（起始序号 + 源记录号 - 1），这样只发运中间一段
+        # 已领用范围时，落地记录仍落在凭据声明的目标端序号上。
+        base_no = self._target_base_no(batch_code)
+        for offset, rec in enumerate(records):
+            line_no = self._source_line_no(rec)
+            target_no = base_no + (line_no - 1 if line_no is not None else offset)
+            rec.setdefault("target_no", target_no)
+
         # 写入暂存产物文件
         output_file = self._data_dir("staging") / f"{staging_code}.jsonl"
         written = self._write_jsonl(output_file, records)
@@ -63,6 +72,8 @@ class StagingAreaService(BaseModuleService):
         entry["占用字节"] = str(total_bytes)
         entry["文件数量"] = "1"
         entry["落地水位"] = str(written)
+        # 供凭据落地核对定位本批在暂存区对应的产物
+        entry["落地标识"] = staging_code
 
         # 写入落地水位断点
         self._write_checkpoint(f"staging_{staging_code}", {
@@ -81,6 +92,29 @@ class StagingAreaService(BaseModuleService):
             "total_bytes": total_bytes,
             "artifact_path": str(output_file),
         }
+
+    @staticmethod
+    def _source_line_no(record: dict[str, Any]) -> int | None:
+        """取记录在源抽取产物中的序号，缺失时返回 None 退回按位置排号。"""
+        for key in ("line_no", "record_no"):
+            try:
+                return int(record.get(key))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _target_base_no(self, batch_code: str) -> int:
+        """取批次归属凭据声明的起始序号，作为本批在目标端接收流里的起算位置。"""
+        try:
+            from app.services.ownership_credential import OwnershipCredentialService
+            svc = OwnershipCredentialService()
+            for cred in svc._active_for_batch(batch_code, ""):
+                start = svc._start_no(cred)
+                if start > 0:
+                    return start
+        except Exception:
+            pass
+        return 1
 
     def confirm_land(self, staging_id: int) -> dict[str, Any]:
         """确认暂存分区落地完成，校验落地产物数据完整性并写入落地确认日志。"""

@@ -20,6 +20,11 @@ from app.services.history_archive import HistoryArchiveService
 from app.services.exchange_replay import ExchangeReplayService
 from app.services.sla_monitor import SlaMonitorService
 from app.services.channel_config import ChannelConfigService
+from app.services.ownership_credential import (
+    OwnershipCredentialService,
+    bootstrap_seed_snapshots,
+)
+from app.store import store
 
 SERVICES: dict[str, BaseModuleService] = {
     "source_register": SourceRegisterService(),
@@ -40,8 +45,13 @@ SERVICES: dict[str, BaseModuleService] = {
     "exchange_replay": ExchangeReplayService(),
     "sla_monitor": SlaMonitorService(),
     "channel_config": ChannelConfigService(),
+    "ownership_credential": OwnershipCredentialService(),
 }
 
 
 def service_for(module: str) -> BaseModuleService | None:
     return SERVICES.get(module)
+
+
+# 服务注册完成后补齐示例凭据的配置快照摘要：静态 seed 不依赖服务，导入期无法自算。
+bootstrap_seed_snapshots(store.rows("ownership_credential"))
